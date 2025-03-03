@@ -13,7 +13,7 @@
 #SBATCH --error=/home/data/nbc/Laird_ABIDE/code/log/%x/%x_%A-%a.err
 # ------------------------------------------
 
-################ needs to be modified ##############
+############### needs to be modified ##############
 set -e
 
 pwd; hostname; date

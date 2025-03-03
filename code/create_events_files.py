@@ -1,5 +1,5 @@
 """Create events files for Stranger Things scans."""
-"""needs to be modified"""
+"""needs to be modified""" 
 
 from glob import glob
 import os.path as op

@@ -69,3 +69,4 @@ exitcode=$?
 rm -rf ${SCRATCH_DIR}
 
 date
+

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import re
 
-############################################## draft ##############################################
+############################################# draft ##############################################
 def _get_parser():
     parser = argparse.ArgumentParser(description="Get outliers from QC metrics")
     parser.add_argument(
