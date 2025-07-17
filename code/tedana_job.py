@@ -140,12 +140,15 @@ def _get_runs(preproc_dir, subject, sessions):
 
     return runs
 
+
 def _get_echos(preproc_files):
     json_files = [file.replace(".nii.gz", ".json") for file in preproc_files]
     return [json.load(open(file))["EchoTime"] for file in json_files]
 
 
-def _transform_scan2mni(sub, ses, task, run, denoised_img_scan, fmriprep_dir, tedana_dir, n_cores):
+def _transform_scan2mni(
+    sub, ses, task, run, denoised_img_scan, fmriprep_dir, tedana_dir, n_cores
+):
     fmriprep_sub_func_dir = (
         op.join(fmriprep_dir, sub, ses, "func")
         if ses
@@ -205,11 +208,12 @@ def _transform_scan2mni(sub, ses, task, run, denoised_img_scan, fmriprep_dir, te
     print(f"\t\t\t{scan2mni.cmdline}", flush=True)
     scan2mni.run()
 
+
 def _organize_files(tedana_sub_func_dir, report_dir):
     """Organize maps and tables in folders.
-    
+
     This is a temporary function to move the report's and log file to a directory
-    named after the prefix argument, to prevent overwriting it when more than one 
+    named after the prefix argument, to prevent overwriting it when more than one
     run or task is written to the same output directory
     """
 
@@ -221,9 +225,13 @@ def _organize_files(tedana_sub_func_dir, report_dir):
     log_files = glob(op.join(tedana_sub_func_dir, "tedana_*.tsv"))
     figure_dir = op.join(tedana_sub_func_dir, "figures")
 
-    [shutil.move(file_, report_dir) for file_ in [report_html_file, report_file, ref_file]]
+    [
+        shutil.move(file_, report_dir)
+        for file_ in [report_html_file, report_file, ref_file]
+    ]
     [shutil.move(file_, report_dir) for file_ in log_files]
     shutil.move(figure_dir, report_dir)
+
 
 def main(
     subject,
@@ -265,6 +273,14 @@ def main(
         run_label = f"_run-{run}" if run else ""
         ses_label = f"_{session}" if session else ""
 
+        print(
+            fmriprep_sub_func_dir,
+            tedana_sub_func_dir,
+            run_label,
+            ses_label,
+            flush=True,
+        )
+
         # Collect important files
         preproc_files = sorted(
             glob(
@@ -293,7 +309,10 @@ def main(
                 flush=True,
             )
             print("\t\t" + "\n\t\t".join(preproc_files), flush=True)
-            print("\t\t\t" + "\n\t\t\t".join([str(echo) for echo in echo_times]), flush=True)
+            print(
+                "\t\t\t" + "\n\t\t\t".join([str(echo) for echo in echo_times]),
+                flush=True,
+            )
             tedana_workflow(
                 preproc_files,
                 echo_times,
@@ -303,24 +322,24 @@ def main(
                 tedpca="kic",
                 verbose=False,
             )
-    
+
             report_dir = op.join(
-                tedana_sub_func_dir, 
-                f"{subject}{ses_label}_task-{task}{run_label}_report"
+                tedana_sub_func_dir,
+                f"{subject}{ses_label}_task-{task}{run_label}_report",
             )
             _organize_files(tedana_sub_func_dir, report_dir)
-    
+
         print(
             f"\t\tTransforming denoised optimally combined time series to MNI...",
             flush=True,
         )
         _transform_scan2mni(
-            subject, 
-            session, 
-            task, 
-            run, 
-            denoised_img_scan, 
-            fmriprep_dir, 
+            subject,
+            session,
+            task,
+            run,
+            denoised_img_scan,
+            fmriprep_dir,
             output_dir,
             n_cores,
         )
