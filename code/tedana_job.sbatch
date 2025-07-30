@@ -8,8 +8,8 @@
 #SBATCH --qos=pq_nbc
 #SBATCH --partition=IB_40C_512G
 # Outputs ----------------------------------
-#SBATCH --output=/home/data/nbc/Laird_CASA/code/jobs/%x/%x_%A-%a.out
-#SBATCH --error=/home/data/nbc/Laird_CASA/code/jobs/%x/%x_%A-%a.err
+#SBATCH --output=/home/data/nbc/Laird_CASA/code/log/%x/%x_%A-%a.out
+#SBATCH --error=/home/data/nbc/Laird_CASA/code/log/%x/%x_%A-%a.err
 # ------------------------------------------
 # Max # CPUs = 360
 # modified from DIVA workflow
@@ -18,28 +18,32 @@ set -e
 
 #==============Shell script==============#
 #Load the software needed
-module add miniconda3-4.5.11-gcc-8.2.0-oqs2mbg
+module load miniconda3-4.5.11-gcc-8.2.0-oqs2mbg
 module load ants-2.3.5
 
-source /home/data/nbc/Laird_CASA/.venv/bin/activate
+source activate /home/champ007/casa-env
 
-DSET_DIR="/home/data/nbc/Laird_DIVA"
+DSET_DIR="/home/data/nbc/Laird_CASA"
 BIDS_DIR="${DSET_DIR}/dset"
 CODE_DIR="${DSET_DIR}/code"
 DERIVS_DIR="${BIDS_DIR}/derivatives"
 
 fmriprep_ver=24.1.1
 tedana_ver=0.0.13
-FMRIPREP_DIR="${DERIVS_DIR}/fmriprep-v${fmriprep_ver}"
-TEDANA_DIR="${DERIVS_DIR}/tedana-v${tedana_ver}"
+FMRIPREP_DIR="${DERIVS_DIR}/fmriprep-${fmriprep_ver}"
+TEDANA_DIR="${DERIVS_DIR}/tedana-${tedana_ver}"
 
-subject=$( sed -n -E "$((${SLURM_ARRAY_TASK_ID} + 1))s/sub-(\S*)\>.*/\1/gp" ${BIDS_DIR}/participants.tsv )
+#subject=$( sed -n -E "$((${SLURM_ARRAY_TASK_ID} + 1))s/sub-(\S*)\>.*/\1/gp" ${BIDS_DIR}/participants.tsv )
+subject=00009 # to test script
+
+task_list=("rest" "mpt" "mist" "sorph")
+tasks=${task_list[$SLURM_ARRAY_TASK_ID]}
 
 analysis="python ${CODE_DIR}/tedana_job.py \
     --subject sub-${subject} \
-    --sessions ses-02 \
-    --task rest \
-    --run 1 \
+    --sessions ses-01 \
+    --task ${tasks} \
+    --run 01 \
     --fmriprep_dir ${FMRIPREP_DIR} \
     --output_dir ${TEDANA_DIR} \
     --n_cores ${SLURM_CPUS_PER_TASK}"
