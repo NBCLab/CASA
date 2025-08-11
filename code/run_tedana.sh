@@ -1,4 +1,4 @@
-#!/bin/bash #test
+#!/bin/bash
 #SBATCH --job-name=tedana
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
