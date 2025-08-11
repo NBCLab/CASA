@@ -1,6 +1,16 @@
+# Dataset folders
 dset/
 sourcedata/
-code/__pycache__
-code/code-test
-code/log
-code/work
+
+# Python cache and temp files
+code/__pycache__/
+code/code-test/
+code/log/
+code/work/
+
+# Local data folders
+behavioral/
+casa-env/
+
+# Jobs folder
+jobs/

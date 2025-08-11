@@ -47,26 +47,38 @@ cmd="${SINGULARITY_CMD} /data \
       --n_procs ${SLURM_CPUS_PER_TASK} \
       --mem_gb ${mem_gb}"
 
-# -w /work \
-echo Running MRIQC for ${subject}
-echo Commandline: $cmd
+echo "Running MRIQC group analysis..."
+echo "Commandline: $cmd"
 eval $cmd
+mriqc_exitcode=$?
 
-rm -rf ${SCRATCH_DIR}
+if [ $mriqc_exitcode -ne 0 ]; then
+    echo "MRIQC failed with exit code $mriqc_exitcode"
+    rm -rf ${SCRATCH_DIR}
+    exit $mriqc_exitcode
+fi
 
-date 
+echo "MRIQC group analysis completed successfully."
 
-exit 0
+# Determine outliers after MRIQC completes
+echo "Running outlier detection and participant exclusion analysis..."
+mriqc_analysis="${SINGULARITY_CMD} python /code/mriqc-group.py --data /out"
+echo "Commandline: $mriqc_analysis"
+eval $mriqc_analysis
+analysis_exitcode=$?
 
-# Determine outliers
-mriqc="${SINGULARITY_CMD} python /code/mriqc-group.py --data /out"
-# Setup done, run the command
-echo
-echo Commandline: $mriqc
-eval $mriqc
-exitcode=$?
+if [ $analysis_exitcode -ne 0 ]; then
+    echo "MRIQC analysis failed with exit code $analysis_exitcode"
+    rm -rf ${SCRATCH_DIR}
+    exit $analysis_exitcode
+fi
 
+echo "MRIQC analysis completed successfully."
+
+# Cleanup
 rm -rf ${SCRATCH_DIR}
 
 date
+echo "All MRIQC processing completed successfully."
 
+exit 0
