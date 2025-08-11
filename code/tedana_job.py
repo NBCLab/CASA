@@ -1,353 +1,235 @@
+#!/usr/bin/env python
 import argparse
 import itertools
 import json
 import os
 import os.path as op
 import shutil
+import subprocess
 from glob import glob
 
 from nipype.interfaces.ants import ApplyTransforms
-from tedana.workflows import tedana_workflow
 
 
 def _get_parser():
-    parser = argparse.ArgumentParser(description="Run tedana in fmriprep derivatives")
-    parser.add_argument(
-        "--subject",
-        dest="subject",
-        required=True,
-        help="Subject identifier, with the sub- prefix.",
-    )
-    parser.add_argument(
-        "--sessions",
-        dest="sessions",
-        default=[None],
-        required=False,
-        nargs="+",
-        help="Sessions identifier, with the ses- prefix.",
-    )
-    parser.add_argument(
-        "--tasks",
-        dest="tasks",
-        default=[None],
-        required=False,
-        nargs="+",
-        help="Task names",
-    )
-    parser.add_argument(
-        "--runs",
-        dest="runs",
-        default=[None],
-        required=False,
-        nargs="+",
-        help="Run names",
-    )
-    parser.add_argument(
-        "--fmriprep_dir",
-        dest="fmriprep_dir",
-        required=True,
-        help="Path to fMRIPrep directory",
-    )
-    parser.add_argument(
-        "--output_dir",
-        dest="output_dir",
-        required=True,
-        help="Path to output directory",
-    )
-    parser.add_argument(
-        "--n_cores",
-        dest="n_cores",
-        default=4,
-        required=False,
-        help="CPUs",
-    )
+    parser = argparse.ArgumentParser(description="Run tedana in fMRIPrep derivatives")
+
+    parser.add_argument("--subject", required=True,
+                        help="Subject identifier, with the sub- prefix (e.g., sub-0001).")
+    parser.add_argument("--sessions", nargs="+", default=[None],
+                        help="Session identifiers with ses- prefix (e.g., ses-01). If omitted, auto-discover.")
+    parser.add_argument("--tasks", nargs="+", default=[None],
+                        help="Task names. If omitted, auto-discover.")
+    parser.add_argument("--runs", nargs="+", default=[None],
+                        help="Run labels (e.g., 01). If omitted, auto-discover.")
+    # Friendly aliases
+    parser.add_argument("--task", dest="tasks", nargs="+", help="Alias for --tasks")
+    parser.add_argument("--run", dest="runs", nargs="+", help="Alias for --runs")
+
+    parser.add_argument("--fmriprep_dir", required=True, help="Path to fMRIPrep derivatives")
+    parser.add_argument("--output_dir", required=True, help="Path to tedana output base directory")
+    parser.add_argument("--n_cores", default=4, type=int, help="Threads for ANTs ApplyTransforms")
+
+    # Optional knobs (CLI-supported)
+    parser.add_argument("--fittype", default="curvefit", choices=["curvefit", "loglin"],
+                        help="T2* fitting method for optcomb.")
+    parser.add_argument("--tedpca", default="kic",
+                        help="Dimensionality estimation for tedana (e.g., kic/mdl/aic/none).")
+    parser.add_argument("--verbose", action="store_true", help="More tedana printouts.")
     return parser
 
 
 def _get_sessions(preproc_dir, subject):
-    temp_ses = sorted(glob(op.join(preproc_dir, subject, "ses-*")))
-    if len(temp_ses) > 0:
-        sessions = [op.basename(x) for x in temp_ses]
-    else:
-        sessions = [None]
-
-    return sessions
+    found = sorted(glob(op.join(preproc_dir, subject, "ses-*")))
+    return [op.basename(x) for x in found] if found else [None]
 
 
 def _get_tasks(preproc_dir, subject, sessions):
-    if sessions[0] is not None:
-        temp_tasks = sorted(
-            glob(
-                op.join(
-                    preproc_dir,
-                    subject,
-                    "ses-*",
-                    "func",
-                    f"*_task-*_desc-confounds_timeseries.tsv",
-                )
-            )
-        )
-    else:
-        temp_tasks = sorted(
-            glob(
-                op.join(
-                    preproc_dir,
-                    subject,
-                    "func",
-                    f"*_task-*_desc-confounds_timeseries.tsv",
-                )
-            )
-        )
-
-    if len(temp_tasks) > 0:
-        tasks = list(
-            set([op.basename(x).split("_task-")[1].split("_")[0] for x in temp_tasks])
-        )
-    else:
-        tasks = [None]
-
-    return tasks
+    pattern = (op.join(preproc_dir, subject, "ses-*", "func", "*_task-*_desc-confounds_timeseries.tsv")
+               if sessions[0] is not None else
+               op.join(preproc_dir, subject, "func", "*_task-*_desc-confounds_timeseries.tsv"))
+    files = sorted(glob(pattern))
+    return list({op.basename(x).split("_task-")[1].split("_")[0] for x in files}) if files else [None]
 
 
 def _get_runs(preproc_dir, subject, sessions):
-    if sessions[0] is not None:
-        temp_runs = sorted(
-            glob(
-                op.join(
-                    preproc_dir,
-                    subject,
-                    "ses-*",
-                    "func",
-                    f"*_run-*_desc-confounds_timeseries.tsv",
-                )
-            )
-        )
-    else:
-        temp_runs = sorted(
-            glob(
-                op.join(
-                    preproc_dir, subject, "func", f"*_run-*_desc-confounds_timeseries"
-                )
-            )
-        )
-
-    if len(temp_runs) > 0:
-        runs = list(
-            set([op.basename(x).split("_run-")[1].split("_")[0] for x in temp_runs])
-        )
-    else:
-        runs = [None]
-
-    return runs
+    pattern = (op.join(preproc_dir, subject, "ses-*", "func", "*_run-*_desc-confounds_timeseries.tsv")
+               if sessions[0] is not None else
+               op.join(preproc_dir, subject, "func", "*_run-*_desc-confounds_timeseries.tsv"))
+    files = sorted(glob(pattern))
+    return list({op.basename(x).split("_run-")[1].split("_")[0] for x in files}) if files else [None]
 
 
 def _get_echos(preproc_files):
-    json_files = [file.replace(".nii.gz", ".json") for file in preproc_files]
-    return [json.load(open(file))["EchoTime"] for file in json_files]
+    echo_times = []
+    for f in preproc_files:
+        jf = f.replace(".nii.gz", ".json")
+        with open(jf, "r") as jh:
+            meta = json.load(jh)
+        if "EchoTime" not in meta:
+            raise KeyError(f"EchoTime not found in {jf}")
+        echo_times.append(meta["EchoTime"])
+    return echo_times
 
 
-def _transform_scan2mni(
-    sub, ses, task, run, denoised_img_scan, fmriprep_dir, tedana_dir, n_cores
-):
-    fmriprep_sub_func_dir = (
-        op.join(fmriprep_dir, sub, ses, "func")
-        if ses
-        else op.join(fmriprep_dir, sub, "func")
-    )
-    fmriprep_sub_anat_dir = (
-        op.join(fmriprep_dir, sub, ses, "anat")
-        if ses
-        else op.join(fmriprep_dir, sub, "anat")
-    )
-    tedana_sub_func_dir = (
-        op.join(tedana_dir, sub, ses, "func")
-        if ses
-        else op.join(tedana_dir, sub, "func")
-    )
+def _find_denoised_file(out_dir, prefix):
+    """
+    Try several naming patterns across tedana versions.
+    Returns path or None.
+    """
+    patterns = [
+        f"{prefix}_desc-optcomDenoised_bold.nii.gz",
+        f"{prefix}_desc-denoised_bold.nii.gz",
+        f"{prefix}_desc-MEICA_denoised_bold.nii.gz",
+        f"{prefix}_desc-optcom_denoised_bold.nii.gz",
+    ]
+    for pat in patterns:
+        cand = op.join(out_dir, pat)
+        if op.isfile(cand):
+            return cand
+    # Last-chance wildcard search
+    hits = glob(op.join(out_dir, f"{prefix}*denois*bold.nii.gz"))
+    return hits[0] if hits else None
+
+
+def _transform_scan2mni(sub, ses, task, run, denoised_img_scan, fmriprep_dir, tedana_dir, n_cores):
+    func_dir = op.join(fmriprep_dir, sub, ses, "func") if ses else op.join(fmriprep_dir, sub, "func")
+    anat_dir = op.join(fmriprep_dir, sub, ses, "anat") if ses else op.join(fmriprep_dir, sub, "anat")
+    out_func = op.join(tedana_dir, sub, ses, "func") if ses else op.join(tedana_dir, sub, "func")
+
     run_label = f"_run-{run}" if run else ""
     ses_label = f"_{ses}" if ses else ""
 
-    denoised_img_MNI = op.join(
-        tedana_sub_func_dir,
-        f"{sub}{ses_label}_task-{task}{run_label}_space-MNI152NLin2009cAsym_"
-        "desc-optcomDenoised_bold.nii.gz",
+    denoised_img_mni = op.join(
+        out_func,
+        f"{sub}{ses_label}_task-{task}{run_label}_space-MNI152NLin2009cAsym_desc-optcomDenoised_bold.nii.gz",
     )
     scan2t1w = op.join(
-        fmriprep_sub_func_dir,
+        func_dir,
         f"{sub}{ses_label}_task-{task}{run_label}_from-scanner_to-T1w_mode-image_xfm.txt",
     )
-    tiw2mni_files = glob(
-        op.join(
-            fmriprep_sub_anat_dir,
-            f"{sub}{ses_label}*_from-T1w_to-MNI152NLin2009cAsym_mode-image_xfm.h5",
-        )
+    t1w2mni_files = glob(
+        op.join(anat_dir, f"{sub}{ses_label}*_from-T1w_to-MNI152NLin2009cAsym_mode-image_xfm.h5")
     )
     references = glob(
-        op.join(
-            fmriprep_sub_anat_dir,
-            f"{sub}{ses_label}_*space-MNI152NLin2009cAsym_*desc-preproc_T1w.nii.gz",
-        )
+        op.join(anat_dir, f"{sub}{ses_label}_*space-MNI152NLin2009cAsym_*desc-preproc_T1w.nii.gz")
     )
-    assert len(references) == 1
-    assert len(tiw2mni_files) == 1
-    reference = references[0]
-    tiw2mni = tiw2mni_files[0]
+    assert len(references) == 1, f"Expected 1 MNI reference, found {len(references)}"
+    assert len(t1w2mni_files) == 1, f"Expected 1 T1w->MNI transform, found {len(t1w2mni_files)}"
 
-    scan2mni = ApplyTransforms()
-    scan2mni.inputs.dimension = 3
-    scan2mni.inputs.input_image_type = 3
-    scan2mni.inputs.input_image = denoised_img_scan
-    scan2mni.inputs.default_value = 0
-    scan2mni.inputs.float = True
-    scan2mni.inputs.interpolation = "LanczosWindowedSinc"
-    scan2mni.inputs.output_image = denoised_img_MNI
-    scan2mni.inputs.reference_image = reference
-    scan2mni.inputs.transforms = [tiw2mni, scan2t1w]
-    scan2mni.inputs.num_threads = n_cores
-    # scan2mni.inputs.verbose = True # Verbosity is not implemented in NiPY
-    print(f"\t\t\t{scan2mni.cmdline}", flush=True)
-    scan2mni.run()
+    reference = references[0]
+    t1w2mni = t1w2mni_files[0]
+
+    at = ApplyTransforms()
+    at.inputs.dimension = 3
+    at.inputs.input_image_type = 3
+    at.inputs.input_image = denoised_img_scan
+    at.inputs.default_value = 0
+    at.inputs.float = True
+    at.inputs.interpolation = "LanczosWindowedSinc"
+    at.inputs.output_image = denoised_img_mni
+    at.inputs.reference_image = reference
+    # antsApplyTransforms applies transforms in reverse order; this yields scan->T1w, then T1w->MNI
+    at.inputs.transforms = [t1w2mni, scan2t1w]
+    at.inputs.num_threads = int(n_cores)
+    print(f"\t\t\t{at.cmdline}", flush=True)
+    at.run()
 
 
 def _organize_files(tedana_sub_func_dir, report_dir):
-    """Organize maps and tables in folders.
-
-    This is a temporary function to move the report's and log file to a directory
-    named after the prefix argument, to prevent overwriting it when more than one
-    run or task is written to the same output directory
-    """
-
+    """Move report, logs, and figures into a dedicated report folder."""
     os.makedirs(report_dir, exist_ok=True)
 
-    report_html_file = op.join(tedana_sub_func_dir, "tedana_report.html")
-    report_file = op.join(tedana_sub_func_dir, "report.txt")
-    ref_file = op.join(tedana_sub_func_dir, "references.bib")
-    log_files = glob(op.join(tedana_sub_func_dir, "tedana_*.tsv"))
-    figure_dir = op.join(tedana_sub_func_dir, "figures")
-
-    [
-        shutil.move(file_, report_dir)
-        for file_ in [report_html_file, report_file, ref_file]
+    maybes = [
+        op.join(tedana_sub_func_dir, "tedana_report.html"),
+        op.join(tedana_sub_func_dir, "report.txt"),
+        op.join(tedana_sub_func_dir, "references.bib"),
     ]
-    [shutil.move(file_, report_dir) for file_ in log_files]
-    shutil.move(figure_dir, report_dir)
+    for p in maybes:
+        if op.isfile(p):
+            shutil.move(p, report_dir)
+
+    for lf in glob(op.join(tedana_sub_func_dir, "tedana_*.tsv")):
+        shutil.move(lf, report_dir)
+
+    figdir = op.join(tedana_sub_func_dir, "figures")
+    if op.isdir(figdir):
+        shutil.move(figdir, report_dir)
 
 
-def main(
-    subject,
-    sessions,
-    tasks,
-    runs,
-    fmriprep_dir,
-    output_dir,
-    n_cores,
-):
-    """Run tedana workflow on a given fMRIPrep derivatives."""
-    n_cores = int(n_cores)  # Use this for parallelizing the for loop.
+def main(subject, sessions, tasks, runs, fmriprep_dir, output_dir, n_cores,
+         fittype="curvefit", tedpca="kic", verbose=False):
+
+    n_cores = int(n_cores)
 
     if sessions[0] is None:
         sessions = _get_sessions(fmriprep_dir, subject)
-
     if tasks[0] is None:
         tasks = _get_tasks(fmriprep_dir, subject, sessions)
-        # TODO: Check that task name is not None, task name is required
-
     if runs[0] is None:
         runs = _get_runs(fmriprep_dir, subject, sessions)
 
     for session, task, run in itertools.product(sessions, tasks, runs):
-        print(
-            f"Processing {subject}, session: {session}, task: {task}, run: {run}...",
-            flush=True,
-        )
-        fmriprep_sub_func_dir = (
-            op.join(fmriprep_dir, subject, session, "func")
-            if session
-            else op.join(fmriprep_dir, subject, "func")
-        )
-        tedana_sub_func_dir = (
-            op.join(output_dir, subject, session, "func")
-            if session
-            else op.join(output_dir, subject, "func")
-        )
+        print(f"Processing {subject}, session: {session}, task: {task}, run: {run}...", flush=True)
+
+        fprep_func = op.join(fmriprep_dir, subject, session, "func") if session else op.join(fmriprep_dir, subject, "func")
+        out_func = op.join(output_dir, subject, session, "func") if session else op.join(output_dir, subject, "func")
+        os.makedirs(out_func, exist_ok=True)
+
         run_label = f"_run-{run}" if run else ""
         ses_label = f"_{session}" if session else ""
+        prefix = f"{subject}{ses_label}_task-{task}{run_label}_space-scan"
 
-        print(
-            fmriprep_sub_func_dir,
-            tedana_sub_func_dir,
-            run_label,
-            ses_label,
-            flush=True,
-        )
-
-        # Collect important files
         preproc_files = sorted(
-            glob(
-                op.join(
-                    fmriprep_sub_func_dir,
-                    f"*task-{task}*{run_label}_echo-*_desc-preproc_bold.nii.gz",
-                )
-            )
+            glob(op.join(fprep_func, f"*task-{task}*{run_label}_echo-*_desc-preproc_bold.nii.gz"))
         )
-        echo_times = _get_echos(preproc_files)
-        assert len(preproc_files) == len(echo_times)
-
-        if len(preproc_files) > 0:
-            os.makedirs(tedana_sub_func_dir, exist_ok=True)
-        else:
+        if not preproc_files:
+            print(f"\tNo preproc files found for task={task}, run={run}. Skipping.", flush=True)
             continue
 
-        denoised_img_scan = op.join(
-            tedana_sub_func_dir,
-            f"{subject}{ses_label}_task-{task}{run_label}_space-scan_desc-optcomDenoised_"
-            "bold.nii.gz",
-        )
-        if not op.isfile(denoised_img_scan):
-            print(
-                f"\tRunning tedana on {subject}, session: {session}, task: {task}, run: {run}...",
-                flush=True,
-            )
-            print("\t\t" + "\n\t\t".join(preproc_files), flush=True)
-            print(
-                "\t\t\t" + "\n\t\t\t".join([str(echo) for echo in echo_times]),
-                flush=True,
-            )
-            tedana_workflow(
-                preproc_files,
-                echo_times,
-                out_dir=tedana_sub_func_dir,
-                prefix=f"{subject}{ses_label}_task-{task}{run_label}_space-scan",
-                fittype="curvefit",
-                tedpca="kic",
-                verbose=False,
-            )
+        echo_times = _get_echos(preproc_files)
+        assert len(preproc_files) == len(echo_times), "Mismatch N echoes vs files."
 
-            report_dir = op.join(
-                tedana_sub_func_dir,
-                f"{subject}{ses_label}_task-{task}{run_label}_report",
-            )
-            _organize_files(tedana_sub_func_dir, report_dir)
+        # --- Run tedana CLI: full pipeline including denoising ---
+        denoised_img_scan = _find_denoised_file(out_func, prefix)
+        if not denoised_img_scan:
+            cmd = (["tedana", "-d"] + preproc_files +
+                   ["-e"] + [str(e) for e in echo_times] +
+                   ["--out-dir", out_func,
+                    "--prefix", prefix,
+                    "--fittype", fittype,
+                    "--tedpca", tedpca])
+            if verbose:
+                cmd.append("--verbose")
 
-        print(
-            f"\t\tTransforming denoised optimally combined time series to MNI...",
-            flush=True,
-        )
-        _transform_scan2mni(
-            subject,
-            session,
-            task,
-            run,
-            denoised_img_scan,
-            fmriprep_dir,
-            output_dir,
-            n_cores,
-        )
+            print("\t\tRunning:", " ".join(cmd), flush=True)
+            subprocess.run(cmd, check=True)
+
+            # Move report & figures out of the func dir into a dedicated report folder
+            report_dir = op.join(out_func, f"{subject}{ses_label}_task-{task}{run_label}_report")
+            _organize_files(out_func, report_dir)
+
+            # Try to find the denoised file now
+            denoised_img_scan = _find_denoised_file(out_func, prefix)
+
+        if not denoised_img_scan:
+            # Fall back to optcom if denoised not found (warn)
+            fallback = op.join(out_func, f"{prefix}_desc-optcom_bold.nii.gz")
+            if op.isfile(fallback):
+                print("\tWARNING: could not find a denoised file; using optcom bold as fallback.", flush=True)
+                denoised_img_scan = fallback
+            else:
+                print("\tERROR: no denoised or optcom file found; skipping transform.", flush=True)
+                continue
+
+        # --- Transform to MNI ---
+        print("\tTransforming denoised/optcom to MNI…", flush=True)
+        _transform_scan2mni(subject, session, task, run, denoised_img_scan, fmriprep_dir, output_dir, n_cores)
 
 
 def _main(argv=None):
-    option = _get_parser().parse_args(argv)
-    kwargs = vars(option)
+    args = _get_parser().parse_args(argv)
+    kwargs = vars(args)
     main(**kwargs)
 
 
