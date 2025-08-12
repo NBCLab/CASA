@@ -7,6 +7,7 @@ import os.path as op
 import shutil
 import subprocess
 from glob import glob
+import pandas as pd
 
 from nipype.interfaces.ants import ApplyTransforms
 
@@ -162,6 +163,17 @@ def main(subject, sessions, tasks, runs, fmriprep_dir, output_dir, n_cores,
 
     n_cores = int(n_cores)
 
+    # --------------------------------------------------
+    # Load echo/run exclusions from MRIQC
+    # --------------------------------------------------
+    exclude_file = "/home/data/nbc/Laird_CASA/dset/derivatives/mriqc-24.0.2/exclude-runs.tsv"
+    if op.exists(exclude_file):
+        excl_df = pd.read_csv(exclude_file, sep="\t")
+        excl_bids = set(excl_df["bids_name"].tolist())
+    else:
+        excl_bids = set()
+        print(f"WARNING: exclude-runs.tsv not found at {exclude_file} — no exclusions applied.")
+
     if sessions[0] is None:
         sessions = _get_sessions(fmriprep_dir, subject)
     if tasks[0] is None:
@@ -180,6 +192,7 @@ def main(subject, sessions, tasks, runs, fmriprep_dir, output_dir, n_cores,
         ses_label = f"_{session}" if session else ""
         prefix = f"{subject}{ses_label}_task-{task}{run_label}_space-scan"
 
+        # Get all echoes for this run
         preproc_files = sorted(
             glob(op.join(fprep_func, f"*task-{task}*{run_label}_echo-*_desc-preproc_bold.nii.gz"))
         )
@@ -187,8 +200,27 @@ def main(subject, sessions, tasks, runs, fmriprep_dir, output_dir, n_cores,
             print(f"\tNo preproc files found for task={task}, run={run}. Skipping.", flush=True)
             continue
 
+        # --------------------------------------------------
+        # Filter out excluded echoes from QC table
+        # --------------------------------------------------
+        good_echo_files = []
+        for f in preproc_files:
+            bids_name = op.basename(f).replace("_desc-preproc_bold.nii.gz", "")
+            if bids_name not in excl_bids:
+                good_echo_files.append(f)
+            else:
+                print(f"\tExcluding {bids_name} from tedana input (failed QC).", flush=True)
+
+        if not good_echo_files:
+            print(f"\tAll echoes excluded for {task} run-{run} — skipping tedana for this run.", flush=True)
+            continue
+
+        preproc_files = good_echo_files
         echo_times = _get_echos(preproc_files)
-        assert len(preproc_files) == len(echo_times), "Mismatch N echoes vs files."
+        assert len(preproc_files) == len(echo_times), "Mismatch N echoes vs files after exclusions."
+
+        # --- The rest of your tedana + transform code remains unchanged ---
+
 
         # --- Run tedana CLI: full pipeline including denoising ---
         denoised_img_scan = _find_denoised_file(out_func, prefix)

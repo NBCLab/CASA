@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import re
 
-############################################# draft ##############################################
+
 def _get_parser():
     parser = argparse.ArgumentParser(description="Get outliers from QC metrics")
     parser.add_argument(
@@ -16,12 +16,33 @@ def _get_parser():
     return parser
 
 
-def extract_subject_from_bids_name(bids_name):
-    """Extract subject ID from BIDS name"""
-    match = re.search(r"(sub-[^_]+)", bids_name)
+def parse_bids_name(bids_name):
+    """Extract BIDS components from bids_name string."""
+    match = re.match(
+        r"(sub-[^_]+)_(ses-[^_]+)_task-([^_]+)_(run-\d+)(?:_(echo-\d+))?_(bold|T1w|T2w)?",
+        bids_name
+    )
     if match:
-        return match.group(1)
-    return None
+        participant_id, session, task, run, echo, modality = match.groups()
+        return {
+            "participant_id": participant_id,
+            "session": session,
+            "task": task,
+            "run": run,
+            "echo": echo if echo else "",
+            "modality": modality if modality else "",
+            "bids_name": bids_name
+        }
+    else:
+        return {
+            "participant_id": "",
+            "session": "",
+            "task": "",
+            "run": "",
+            "echo": "",
+            "modality": "",
+            "bids_name": bids_name
+        }
 
 
 def check_fd_mean_exclusions(data_dir):
@@ -32,30 +53,28 @@ def check_fd_mean_exclusions(data_dir):
     for filename in files_to_check:
         filepath = op.join(data_dir, filename)
         if not op.exists(filepath):
-            print("Warning: {} not found, skipping fd_mean check for this file.".format(filename))
+            print(f"Warning: {filename} not found, skipping fd_mean check.")
             continue
 
         try:
             df = pd.read_csv(filepath, sep="\t")
             if "fd_mean" not in df.columns:
-                print("Warning: fd_mean column not found in {}, skipping.".format(filename))
+                print(f"Warning: fd_mean column not found in {filename}, skipping.")
                 continue
 
             high_fd_df = df[df["fd_mean"] > 0.35]
-            print("Found {} entries with fd_mean > 0.35 in {}".format(len(high_fd_df), filename))
+            print(f"Found {len(high_fd_df)} entries with fd_mean > 0.35 in {filename}")
 
             for _, row in high_fd_df.iterrows():
                 bids_name = row.get("bids_name", "")
                 excluded_runs.add(bids_name)
-                print("  Excluding {} (fd_mean={:.3f}) from {}".format(
-                    bids_name, row['fd_mean'], filename
-                ))
+                print(f"  Excluding {bids_name} (fd_mean={row['fd_mean']:.3f}) from {filename}")
 
         except Exception as e:
-            print("Error processing {}: {}".format(filename, str(e)))
+            print(f"Error processing {filename}: {e}")
             continue
 
-    return list(excluded_runs)
+    return excluded_runs
 
 
 def main(data):
@@ -70,65 +89,48 @@ def main(data):
         "rest": ["run-01", "run-02"],
     }
 
-    # Functional QC metrics of interest
     qc_metrics = ["efc", "snr", "fd_mean", "tsnr"]
+    percentile_excluded = set()
 
-    # DataFrame to store all excluded runs
-    all_excluded_runs = []
-
-    # Process each task separately
+    # Process each task separately for percentile-based exclusions
     for task, runs in task_runs.items():
-        task_df = mriqc_group_df[mriqc_group_df["bids_name"].str.contains(f"task-{task}")]
+        task_df = mriqc_group_df[mriqc_group_df["bids_name"].str.contains(f"task-{task}", na=False)]
 
         if task_df.empty:
             print(f"No data found for task-{task}, skipping.")
             continue
 
         for qc_metric in qc_metrics:
-            upper, lower = np.percentile(task_df[qc_metric].values, [99, 1])
+            vals = task_df[qc_metric].dropna().values
+            if len(vals) == 0:
+                continue
+
+            upper, lower = np.percentile(vals, [99, 1])
 
             if qc_metric in ["efc", "fd_mean"]:
-                run2exclude = task_df.loc[task_df[qc_metric].values > upper]
+                run2exclude = task_df.loc[task_df[qc_metric] > upper]
             elif qc_metric in ["snr", "tsnr"]:
-                run2exclude = task_df.loc[task_df[qc_metric].values < lower]
+                run2exclude = task_df.loc[task_df[qc_metric] < lower]
+            else:
+                continue
 
-            for _, row in run2exclude.iterrows():
-                bids_name = row["bids_name"]  # e.g., "sub-001_task-mist_run-01_bold"
+            percentile_excluded.update(run2exclude["bids_name"].dropna().tolist())
 
-                # Extract subject, task, and run number
-                match = re.search(r"(sub-\d+)_task-([a-zA-Z0-9]+)_run-(\d+)", bids_name)
-                if match:
-                    subject, task_name, run_number = match.groups()
-                    formatted_run = f"run-{run_number}"
+    # fd_mean > 0.35 exclusions
+    fd_excluded = check_fd_mean_exclusions(data)
 
-                    # Only include if the run is in the expected list
-                    if formatted_run in runs:
-                        formatted_entry = f"{subject}_task-{task_name}_{formatted_run}"
-                        all_excluded_runs.append(formatted_entry)
+    # Merge both exclusion sets
+    all_excluded = sorted(percentile_excluded.union(fd_excluded))
 
-    # Save runs to exclude to a TSV file
-    if all_excluded_runs:
-        output_df = pd.DataFrame(all_excluded_runs, columns=["excluded_runs"])
-        output_file = op.join(data, "runs_to_exclude.tsv")
-        output_df.to_csv(output_file, sep="\t", index=False)
-        print(f"Saved all excluded runs to {output_file}")
-    else:
-        print("No outliers detected across tasks for run exclusions.")
+    # Parse into columns
+    organized_data = [parse_bids_name(name) for name in all_excluded]
+    runs_df = pd.DataFrame(organized_data)
+    runs_df.sort_values(by=["participant_id", "task", "run", "echo"], inplace=True)
 
-    # Check fd_mean > 0.35 across all MRIQC files for participant exclusions
-    print("\nChecking fd_mean > 0.35 for participant exclusions...")
-    excluded_subjects = check_fd_mean_exclusions(data)
-    
-    excluded_runs = check_fd_mean_exclusions(data)
-
-    if excluded_runs:
-        runs_df = pd.DataFrame(excluded_runs, columns=["bids_name"])
-        runs_output_file = op.join(data, "exclude-runs.tsv")
-        runs_df.to_csv(runs_output_file, sep="\t", index=False)
-        print("\nSaved {} excluded runs to {}".format(len(excluded_runs), runs_output_file))
-    else:
-        print("No runs found with fd_mean > 0.35.")
-
+    # Save combined output
+    output_file = op.join(data, "exclude-runs.tsv")
+    runs_df.to_csv(output_file, sep="\t", index=False)
+    print(f"\nSaved {len(runs_df)} total excluded runs to {output_file}")
 
 
 def _main(argv=None):
