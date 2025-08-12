@@ -60,9 +60,12 @@ fi
 
 echo "MRIQC group analysis completed successfully."
 
+module load miniconda3-4.5.11-gcc-8.2.0-oqs2mbg
+source activate /home/data/nbc/Laird_CASA/casa-env
+
 # Determine outliers after MRIQC completes
 echo "Running outlier detection and participant exclusion analysis..."
-mriqc_analysis="${SINGULARITY_CMD} python /code/mriqc-group.py --data /out"
+mriqc_analysis="python ${CODE_DIR}/mriqc_group.py --data ${DERIVS_DIR}"
 echo "Commandline: $mriqc_analysis"
 eval $mriqc_analysis
 analysis_exitcode=$?
