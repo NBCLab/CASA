@@ -15,6 +15,11 @@
 set -euo pipefail
 pwd; hostname; date
 
+# Max # CPUs = 360, lets take 300 -> 12 participants
+# sbatch --array=1 run_tedana.sh, "to check that everything is fine"
+# sbatch --array=2-12%6 run_tedana.sh
+THISJOBVALUE=${SLURM_ARRAY_TASK_ID}
+
 #--------------------------------------------------
 # Conda activation (batch-safe)
 #--------------------------------------------------
@@ -51,10 +56,8 @@ mkdir -p "${TEDANA_DIR}"
 mkdir -p "${CODE_DIR}/log/${SLURM_JOB_NAME}"
 mkdir -p "${CODE_DIR}/jobs/${SLURM_JOB_NAME}"
 
-#--------------------------------------------------
-# Subject (fixed to 00009 for now)
-#--------------------------------------------------
-subject=00009
+# Parse the participants.tsv file and extract one subject ID from the line corresponding to this SLURM task.
+subject=$( sed -n -E "$((${THISJOBVALUE} + 1))s/sub-(\S*)\>.*/\1/gp" ${BIDS_DIR}/participants.tsv )
 echo "Processing subject: sub-${subject}"
 
 #--------------------------------------------------
