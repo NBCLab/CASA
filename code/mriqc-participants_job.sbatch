@@ -33,6 +33,7 @@ IMG_DIR="/home/data/cis/singularity-images"
 
 # Parse the participants.tsv file and extract one subject ID from the line corresponding to this SLURM task.
 subject=$( sed -n -E "$((${THISJOBVALUE} + 1))s/sub-(\S*)\>.*/\1/gp" ${BIDS_DIR}/participants.tsv )
+# subject="sub-00011"
 
 SCRATCH_DIR="/scratch/nbc/champ007/Laird_CASA/mriqc-${mriqc_version}/${subject}"
 TEMPLATEFLOW_HOST_HOME="/home/data/cis/templateflow"
