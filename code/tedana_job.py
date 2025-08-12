@@ -46,19 +46,40 @@ def _get_sessions(preproc_dir, subject):
 
 
 def _get_tasks(preproc_dir, subject, sessions):
-    pattern = (op.join(preproc_dir, subject, "ses-*", "func", "*_task-*_desc-confounds_timeseries.tsv")
-               if sessions[0] is not None else
-               op.join(preproc_dir, subject, "func", "*_task-*_desc-confounds_timeseries.tsv"))
-    files = sorted(glob(pattern))
-    return list({op.basename(x).split("_task-")[1].split("_")[0] for x in files}) if files else [None]
+    # Discover tasks from confounds TSVs; if missing, fall back to preproc bolds
+    patt1 = (op.join(preproc_dir, subject, "ses-*", "func", "*_task-*_desc-confounds_timeseries.tsv")
+             if sessions[0] is not None else
+             op.join(preproc_dir, subject, "func", "*_task-*_desc-confounds_timeseries.tsv"))
+    files = sorted(glob(patt1))
+    if not files:
+        patt2 = (op.join(preproc_dir, subject, "ses-*", "func", "*_task-*_desc-preproc_bold.nii.gz")
+                 if sessions[0] is not None else
+                 op.join(preproc_dir, subject, "func", "*_task-*_desc-preproc_bold.nii.gz"))
+        files = sorted(glob(patt2))
+    return sorted({op.basename(x).split("_task-")[1].split("_")[0] for x in files}) if files else [None]
 
 
-def _get_runs(preproc_dir, subject, sessions):
-    pattern = (op.join(preproc_dir, subject, "ses-*", "func", "*_run-*_desc-confounds_timeseries.tsv")
-               if sessions[0] is not None else
-               op.join(preproc_dir, subject, "func", "*_run-*_desc-confounds_timeseries.tsv"))
-    files = sorted(glob(pattern))
-    return list({op.basename(x).split("_run-")[1].split("_")[0] for x in files}) if files else [None]
+def _get_runs_for_task(preproc_dir, subject, sessions, task):
+    # Runs per task; prefer ME, fall back to SE (allow tokens between run-XX and desc-…)
+    if sessions[0] is not None:
+        patt_me = op.join(preproc_dir, subject, "ses-*", "func",
+                          f"*task-{task}_run-*_echo-*_desc-preproc_bold.nii.gz")
+        patt_se = op.join(preproc_dir, subject, "ses-*", "func",
+                          f"*task-{task}_run-*_*_desc-preproc_bold.nii.gz")
+    else:
+        patt_me = op.join(preproc_dir, subject, "func",
+                          f"*task-{task}_run-*_echo-*_desc-preproc_bold.nii.gz")
+        patt_se = op.join(preproc_dir, subject, "func",
+                          f"*task-{task}_run-*_*_desc-preproc_bold.nii.gz")
+
+    files = sorted(glob(patt_me))
+    if not files:
+        files = sorted(glob(patt_se))
+    if not files:
+        return [None]
+
+    runs = {op.basename(x).split("_run-")[1].split("_")[0] for x in files}
+    return sorted(runs)
 
 
 def _get_echos(preproc_files):
@@ -97,6 +118,9 @@ def _transform_scan2mni(sub, ses, task, run, denoised_img_scan, fmriprep_dir, te
     func_dir = op.join(fmriprep_dir, sub, ses, "func") if ses else op.join(fmriprep_dir, sub, "func")
     anat_dir = op.join(fmriprep_dir, sub, ses, "anat") if ses else op.join(fmriprep_dir, sub, "anat")
     out_func = op.join(tedana_dir, sub, ses, "func") if ses else op.join(tedana_dir, sub, "func")
+
+    # Ensure destination directory exists now that we know we're transforming
+    os.makedirs(out_func, exist_ok=True)
 
     run_label = f"_run-{run}" if run else ""
     ses_label = f"_{ses}" if ses else ""
@@ -174,89 +198,109 @@ def main(subject, sessions, tasks, runs, fmriprep_dir, output_dir, n_cores,
         excl_bids = set()
         print(f"WARNING: exclude-runs.tsv not found at {exclude_file} — no exclusions applied.")
 
+    # --------------------------------------------------
+    # Discover sessions, tasks, runs-per-task
+    # --------------------------------------------------
     if sessions[0] is None:
         sessions = _get_sessions(fmriprep_dir, subject)
     if tasks[0] is None:
         tasks = _get_tasks(fmriprep_dir, subject, sessions)
-    if runs[0] is None:
-        runs = _get_runs(fmriprep_dir, subject, sessions)
 
-    for session, task, run in itertools.product(sessions, tasks, runs):
-        print(f"Processing {subject}, session: {session}, task: {task}, run: {run}...", flush=True)
+    runs_by_task = {t: _get_runs_for_task(fmriprep_dir, subject, sessions, t) for t in tasks}
+    print(f"Sessions: {sessions}")
+    print(f"Tasks:    {tasks}")
+    print(f"Runs by task: {runs_by_task}")
 
-        fprep_func = op.join(fmriprep_dir, subject, session, "func") if session else op.join(fmriprep_dir, subject, "func")
-        out_func = op.join(output_dir, subject, session, "func") if session else op.join(output_dir, subject, "func")
-        os.makedirs(out_func, exist_ok=True)
+    for session in sessions:
+        for task in tasks:
+            task_runs = runs_by_task.get(task, [None])
+            for run in task_runs:
+                print(f"Processing {subject}, session: {session}, task: {task}, run: {run}...", flush=True)
 
-        run_label = f"_run-{run}" if run else ""
-        ses_label = f"_{session}" if session else ""
-        prefix = f"{subject}{ses_label}_task-{task}{run_label}_space-scan"
+                fprep_func = op.join(fmriprep_dir, subject, session, "func") if session else op.join(fmriprep_dir, subject, "func")
+                out_func = op.join(output_dir, subject, session, "func") if session else op.join(output_dir, subject, "func")
 
-        # Get all echoes for this run
-        preproc_files = sorted(
-            glob(op.join(fprep_func, f"*task-{task}*{run_label}_echo-*_desc-preproc_bold.nii.gz"))
-        )
-        if not preproc_files:
-            print(f"\tNo preproc files found for task={task}, run={run}. Skipping.", flush=True)
-            continue
+                run_label = f"_run-{run}" if run else ""
+                ses_label = f"_{session}" if session else ""
+                prefix = f"{subject}{ses_label}_task-{task}{run_label}_space-scan"
 
-        # --------------------------------------------------
-        # Filter out excluded echoes from QC table
-        # --------------------------------------------------
-        good_echo_files = []
-        for f in preproc_files:
-            bids_name = op.basename(f).replace("_desc-preproc_bold.nii.gz", "")
-            if bids_name not in excl_bids:
-                good_echo_files.append(f)
-            else:
-                print(f"\tExcluding {bids_name} from tedana input (failed QC).", flush=True)
+                # Get ME echoes first; if none, try SE (allow tokens between run-XX and desc-…)
+                preproc_files = sorted(
+                    glob(op.join(fprep_func, f"*task-{task}*{run_label}_echo-*_desc-preproc_bold.nii.gz"))
+                )
+                is_me = True
+                if not preproc_files:
+                    preproc_files = sorted(
+                        glob(op.join(fprep_func, f"*task-{task}*{run_label}*_desc-preproc_bold.nii.gz"))
+                    )
+                    is_me = False
 
-        if not good_echo_files:
-            print(f"\tAll echoes excluded for {task} run-{run} — skipping tedana for this run.", flush=True)
-            continue
+                if not preproc_files:
+                    print(f"\tNo preproc files found for task={task}, run={run}. Skipping.", flush=True)
+                    continue
 
-        preproc_files = good_echo_files
-        echo_times = _get_echos(preproc_files)
-        assert len(preproc_files) == len(echo_times), "Mismatch N echoes vs files after exclusions."
+                if not is_me:
+                    print("\tSingle-echo data detected — skipping tedana for this run (no directories created).", flush=True)
+                    continue
 
-        # --- The rest of your tedana + transform code remains unchanged ---
+                # --------------------------------------------------
+                # Filter out excluded echoes from QC table
+                # --------------------------------------------------
+                good_echo_files = []
+                for f in preproc_files:
+                    # Build QC-style key (…_bold) to match bids_name in exclude-runs.tsv
+                    qc_key = op.basename(f).replace("_desc-preproc_bold.nii.gz", "") + "_bold"
+                    if qc_key not in excl_bids:
+                        good_echo_files.append(f)
+                    else:
+                        print(f"\tExcluding {qc_key} from tedana input (failed QC).", flush=True)
 
+                if not good_echo_files:
+                    print(f"\tAll echoes excluded for {task} run-{run} — skipping tedana for this run (no directories created).", flush=True)
+                    continue
 
-        # --- Run tedana CLI: full pipeline including denoising ---
-        denoised_img_scan = _find_denoised_file(out_func, prefix)
-        if not denoised_img_scan:
-            cmd = (["tedana", "-d"] + preproc_files +
-                   ["-e"] + [str(e) for e in echo_times] +
-                   ["--out-dir", out_func,
-                    "--prefix", prefix,
-                    "--fittype", fittype,
-                    "--tedpca", tedpca])
-            if verbose:
-                cmd.append("--verbose")
+                # At this point we know we have ME data to process → create output dir
+                os.makedirs(out_func, exist_ok=True)
 
-            print("\t\tRunning:", " ".join(cmd), flush=True)
-            subprocess.run(cmd, check=True)
+                preproc_files = good_echo_files
+                echo_times = _get_echos(preproc_files)
+                assert len(preproc_files) == len(echo_times), "Mismatch N echoes vs files after exclusions."
 
-            # Move report & figures out of the func dir into a dedicated report folder
-            report_dir = op.join(out_func, f"{subject}{ses_label}_task-{task}{run_label}_report")
-            _organize_files(out_func, report_dir)
+                # --- Run tedana CLI: full pipeline including denoising ---
+                denoised_img_scan = _find_denoised_file(out_func, prefix)
+                if not denoised_img_scan:
+                    cmd = (["tedana", "-d"] + preproc_files +
+                           ["-e"] + [str(e) for e in echo_times] +
+                           ["--out-dir", out_func,
+                            "--prefix", prefix,
+                            "--fittype", fittype,
+                            "--tedpca", tedpca])
+                    if verbose:
+                        cmd.append("--verbose")
 
-            # Try to find the denoised file now
-            denoised_img_scan = _find_denoised_file(out_func, prefix)
+                    print("\t\tRunning:", " ".join(cmd), flush=True)
+                    subprocess.run(cmd, check=True)
 
-        if not denoised_img_scan:
-            # Fall back to optcom if denoised not found (warn)
-            fallback = op.join(out_func, f"{prefix}_desc-optcom_bold.nii.gz")
-            if op.isfile(fallback):
-                print("\tWARNING: could not find a denoised file; using optcom bold as fallback.", flush=True)
-                denoised_img_scan = fallback
-            else:
-                print("\tERROR: no denoised or optcom file found; skipping transform.", flush=True)
-                continue
+                    # Move report & figures out of the func dir into a dedicated report folder
+                    report_dir = op.join(out_func, f"{subject}{ses_label}_task-{task}{run_label}_report")
+                    _organize_files(out_func, report_dir)
 
-        # --- Transform to MNI ---
-        print("\tTransforming denoised/optcom to MNI…", flush=True)
-        _transform_scan2mni(subject, session, task, run, denoised_img_scan, fmriprep_dir, output_dir, n_cores)
+                    # Try to find the denoised file now
+                    denoised_img_scan = _find_denoised_file(out_func, prefix)
+
+                if not denoised_img_scan:
+                    # Fall back to optcom if denoised not found (warn)
+                    fallback = op.join(out_func, f"{prefix}_desc-optcom_bold.nii.gz")
+                    if op.isfile(fallback):
+                        print("\tWARNING: could not find a denoised file; using optcom bold as fallback.", flush=True)
+                        denoised_img_scan = fallback
+                    else:
+                        print("\tERROR: no denoised or optcom file found; skipping transform.", flush=True)
+                        continue
+
+                # --- Transform to MNI ---
+                print("\tTransforming denoised/optcom to MNI…", flush=True)
+                _transform_scan2mni(subject, session, task, run, denoised_img_scan, fmriprep_dir, output_dir, n_cores)
 
 
 def _main(argv=None):
